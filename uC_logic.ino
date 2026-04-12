@@ -42,6 +42,12 @@ const uint32_t FREQ_STEP = 100;
 const uint32_t MIN_FREQ = 20000, MAX_FREQ = 150000;
 const uint32_t UNLOCK_OFFSET = 3400;
 
+// ===== TANK FREQUENCY MEASUREMENT (for unlocked protection) =====
+volatile uint32_t tank_last_edge_us = 0;
+volatile uint32_t tank_period_us = 0;   // 0 = no valid measurement yet
+const uint32_t TANK_MIN_GAP_KHZ = 1000; // keep cur_freq >= tank_freq + 1 kHz
+unsigned long last_tank_fresh = 0;
+
 // ===== CT PHASE COMPENSATION =====
 // The CT's phase offset follows arctan(2πf·τ) where τ = L_ct / R_burden.
 // At high frequencies the offset is large; at low frequencies it shrinks.
@@ -105,6 +111,12 @@ void tankISR() {
   if (digitalRead(TANK_PIN) == HIGH) {
     tank_cnt = TIM1->CNT;
     new_edge = true;
+
+    uint32_t now = micros();
+    uint32_t dt  = now - tank_last_edge_us;
+    tank_last_edge_us = now;
+    // Accept only plausible periods (20-200 kHz range = 5-50 us)
+    if (dt >= 5 && dt <= 50) tank_period_us = dt;
   }
 }
 
@@ -457,6 +469,26 @@ void loop() {
       uint32_t sf = (locked_freq > 0) ? locked_freq + 1000 : start_frequency + UNLOCK_OFFSET;
       if (sf > MAX_FREQ) sf = MAX_FREQ;
       updateFreq(sf); freq_acc = sf; last_lock = LOW;
+    }
+  }
+
+  // ---- UNLOCKED: keep cur_freq >= tank_freq + 1 kHz ----
+  if (!phase_locked) {
+    noInterrupts();
+    uint32_t tp = tank_period_us;
+    uint32_t te = tank_last_edge_us;
+    interrupts();
+
+    // Only act if we've seen edges recently (within 20 ms)
+    if (tp > 0 && (micros() - te) < 20000UL) {
+      uint32_t tank_f = 1000000UL / tp;                 // Hz
+      uint32_t floor_f = tank_f + TANK_MIN_GAP_KHZ;     // min allowed cur_freq
+      if (floor_f > MAX_FREQ) floor_f = MAX_FREQ;
+      if (cur_freq < floor_f && (millis() - last_tank_fresh) >= 5) {
+        last_tank_fresh = millis();
+        updateFreq(floor_f);
+        freq_acc = floor_f;
+      }
     }
   }
 
