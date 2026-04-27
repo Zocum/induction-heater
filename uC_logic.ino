@@ -1,18 +1,27 @@
 // ===================================================================
 // Induction Heater Controller - STM32 Blue Pill (STM32F103C8T6)
 // ===================================================================
-// FLASH-OPTIMIZED: Direct TIM1 registers, no HardwareTimer, no OneWire lib
+// Phase measurement: HARDWARE INPUT CAPTURE.
+//   - TIM1 generates PWM on PA8 and emits an Update trigger (TRGO) on
+//     each reload (i.e. on every PWM rising edge).
+//   - TIM2 runs at 72 MHz, slaved to TIM1 via ITR0 in Reset Mode so
+//     TIM2->CNT is reset to 0 at every PWM rising edge.
+//   - TIM2_CH1 (= PA0) is configured as input capture, rising edge.
+//     TIM2->CCR1 is latched in hardware the instant PA0 goes high.
+//   - Therefore CCR1 = time in 72 MHz ticks from PWM rising edge to
+//     tank-current rising edge at the pin, with zero software latency.
 //
-// Phase measurement: reads TIM1->CNT in tank current ISR.
-// Counter value directly encodes phase offset from PWM rising edge.
+// TARGET_PHASE now represents only physical delay in the signal path
+// (mostly LM339 propagation delay), not ISR latency.
 //
 // WIRING:
-//   PA0  -> Tank current zero-crossing
+//   PA0  -> Tank current zero-crossing (from LM339 after CT) [TIM2_CH1]
+//   PA8  -> PWM output                                       [TIM1_CH1]
 //   PB12 -> Lock switch (active HIGH)
 //   PB14 -> Frequency UP button
 //   PB15 -> Frequency DOWN button
 //   PA1  -> DS18B20 (4.7k pull-up to 3.3V)
-//   PB6(SCL/Clock)/PB7(SDA/Data) -> I2C1 OLED 
+//   PB6(SCL)/PB7(SDA) -> I2C1 OLED
 // ====================================================================
 
 #include <Wire.h>
@@ -42,32 +51,16 @@ const uint32_t FREQ_STEP = 100;
 const uint32_t MIN_FREQ = 20000, MAX_FREQ = 150000;
 const uint32_t UNLOCK_OFFSET = 3400;
 
-// ===== TANK FREQUENCY MEASUREMENT (for unlocked protection) =====
-volatile uint32_t tank_last_edge_us = 0;
-volatile uint32_t tank_period_us = 0;   // 0 = no valid measurement yet
-const uint32_t TANK_MIN_GAP_KHZ = 1000; // keep cur_freq >= tank_freq + 1 kHz
-unsigned long last_tank_fresh = 0;
+// ===== PHASE TARGET =====
+// With hardware input capture, the ONLY residual delay between the
+// tank-current edge at the pin and the captured CCR1 value is:
+//   - LM339 propagation delay (~1.3-2 us typical @ 52 kHz -> ~25-38 deg)
+//   - CT/signal conditioning phase shift (usually small)
+// Software/ISR latency is effectively zero. Retune this after flashing.
+const float TARGET_PHASE = 22.0f;
 
-// ===== CT PHASE COMPENSATION =====
-// The CT's phase offset follows arctan(2πf·τ) where τ = L_ct / R_burden.
-// At high frequencies the offset is large; at low frequencies it shrinks.
-// A fixed target works at one frequency but drifts at others.
-//
-// Calibration: set CAL_FREQ to a frequency where locking works well,
-// and CAL_PHASE to the phase reading at true resonance at that frequency.
-// The code computes τ from this point and adjusts the target automatically.
-const uint32_t CAL_FREQ  = 52400;     // Hz — frequency where you calibrated
-const float    CAL_PHASE = 80.0f;     // degrees — measured phase at Fres at CAL_FREQ
-float ct_tau = 0.0f;                  // CT time constant (seconds), set in setup()
-
-// Compute the expected CT phase offset at a given frequency
-float ctTargetPhase(uint32_t f) {
-  return atan2f(6.2831853f * (float)f * ct_tau, 1.0f) * 57.29578f;
-}
-
-float target_phase = 83.0f;           // current target, updated every PID tick
 const float PHASE_JUMP_TH = 120.0f;
-float last_valid_phase = 83.0f;
+float last_valid_phase = TARGET_PHASE;
 
 // ===== CONTROL =====
 const float LOCK_ENTER_TH = 6.0f, LOCK_EXIT_TH = 12.0f;
@@ -76,9 +69,7 @@ const int32_t MFC_L = 50, MFC_M = 10, MFC_S = 2;
 const unsigned long FREQ_UPD_INT = 20;
 
 // ===== PHASE MEASUREMENT =====
-volatile uint16_t tank_cnt = 0;
-volatile bool new_edge = false;
-volatile bool phase_hist_init = false;
+bool phase_hist_init = false;
 
 // ===== NOISE REJECTION =====
 volatile uint16_t rejected_cnt = 0;
@@ -106,19 +97,11 @@ unsigned long last_debug = 0;
 volatile uint16_t dbg_cnt_val = 0;
 volatile bool dbg_rejected = false;
 
-// ===== ISR: Tank current zero-crossing =====
-void tankISR() {
-  if (digitalRead(TANK_PIN) == HIGH) {
-    tank_cnt = TIM1->CNT;
-    new_edge = true;
-
-    uint32_t now = micros();
-    uint32_t dt  = now - tank_last_edge_us;
-    tank_last_edge_us = now;
-    // Accept only plausible periods (20-200 kHz range = 5-50 us)
-    if (dt >= 5 && dt <= 50) tank_period_us = dt;
-  }
-}
+// ===== LIVE PHASE DISPLAY =====
+// Updated on every valid capture, regardless of lock state, so the user
+// can watch phase change while sweeping frequency manually.
+float cur_phase = 0.0f;
+bool  phase_valid = false;
 
 // ===== HELPERS =====
 static float wrap180(float a) {
@@ -206,7 +189,7 @@ void TIM1_Init(uint32_t freq_hz) {
   GPIOA->CRH = (GPIOA->CRH & ~(0xFUL << 0)) | (0xBUL << 0);
 
   TIM1->CR1 = 0;
-  TIM1->CR2 = 0;
+  TIM1->CR2 = (0x2 << 4);  // MMS = 010: Update event as TRGO -> TIM2 ITR0
   TIM1->PSC = 0;
 
   uint32_t arr = (TCLK / freq_hz) - 1;
@@ -224,6 +207,42 @@ void TIM1_Init(uint32_t freq_hz) {
   TIM1->CR1 = TIM_CR1_ARPE | TIM_CR1_CEN;
 
   cur_freq = freq_hz;
+}
+
+// ===== TIM2 INPUT CAPTURE INIT =====
+// PA0 = TIM2_CH1 (default pin mapping, no remap needed).
+// TIM2 runs at 72 MHz (same as TIM1: APB1=36 MHz -> TIMxCLK = 2x = 72 MHz).
+// Slave mode Reset: TIM1's Update TRGO (via ITR0) resets TIM2->CNT to 0
+// at every PWM rising edge. CH1 captures CCR1 on rising edge of PA0.
+// CCR1 therefore holds the exact delay in 72 MHz ticks from PWM rising
+// edge to tank edge at the pin.
+void TIM2_CaptureInit(void) {
+  RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;
+
+  // PA0 is already configured as INPUT by pinMode() in setup(), which is
+  // what TIM2_CH1 needs (the timer reads from the pin IDR).
+
+  TIM2->CR1  = 0;
+  TIM2->PSC  = 0;        // 72 MHz tick (matches TIM1)
+  TIM2->ARR  = 0xFFFF;   // free-run max; will be reset each PWM period
+  TIM2->CNT  = 0;
+
+  // CC1 channel: input capture, IC1 mapped to TI1 (PA0)
+  //   CCMR1: CC1S = 01 (IC1 on TI1), no prescaler, no filter
+  TIM2->CCMR1 = TIM_CCMR1_CC1S_0;
+
+  // Enable capture, rising edge (CC1P = 0, CC1NP = 0, CC1E = 1)
+  TIM2->CCER = TIM_CCER_CC1E;
+
+  // Slave mode control:
+  //   SMS = 100 (Reset Mode): rising edge of selected trigger resets CNT
+  //   TS  = 000 (ITR0 = TIM1)
+  TIM2->SMCR = 0x04;
+
+  TIM2->DIER = 0;        // no interrupts; we poll CC1IF in the main loop
+  TIM2->SR   = 0;        // clear any pending flags
+
+  TIM2->CR1 = TIM_CR1_CEN;
 }
 
 // ===== FREQUENCY UPDATE =====
@@ -267,17 +286,36 @@ void updateDisplay(float err, bool in_db) {
   }
   u8x8.print(F("C           "));
 
+  // Row 4: live phase always; error too when locked
   u8x8.setCursor(0, 4);
-  if (phase_locked) {
-    int ei = (int)(err * 10.0f);
-    u8x8.print(F("E:"));
-    if (ei < 0) { u8x8.print('-'); ei = -ei; } else u8x8.print(' ');
-    u8x8.print(ei / 10);
+  if (phase_valid) {
+    u8x8.print(F("P:"));
+    float p = cur_phase;
+    if (p < 0) { u8x8.print('-'); p = -p; } else u8x8.print(' ');
+    int pi = (int)(p * 10.0f + 0.5f);     // tenths of a degree
+    if (pi < 1000) u8x8.print(' ');
+    if (pi < 100)  u8x8.print(' ');
+    u8x8.print(pi / 10);
     u8x8.print('.');
-    u8x8.print(ei % 10);
-    u8x8.print(F("deg   "));
+    u8x8.print(pi % 10);
+    // 8 chars used: "P: 35.2"  /  "P:-12.3"  /  "P:180.0"
+
+    if (phase_locked) {
+      u8x8.print(F(" E:"));
+      float e = err;
+      if (e < 0) { u8x8.print('-'); e = -e; } else u8x8.print(' ');
+      int ei = (int)(e * 10.0f + 0.5f);
+      if (ei < 100) u8x8.print(' ');
+      u8x8.print(ei / 10);
+      u8x8.print('.');
+      u8x8.print(ei % 10);
+      // 7 more chars: " E:+0.3"  -> 15 total, +1 pad
+      u8x8.print(F(" "));
+    } else {
+      u8x8.print(F("        "));      // pad to clear old error
+    }
   } else {
-    u8x8.print(F("                "));
+    u8x8.print(F("P: ---          "));
   }
 
   u8x8.setCursor(0, 5);
@@ -349,9 +387,7 @@ void handleSerial() {
       else if (cb[0] == 's') {
         Serial.print(cur_freq); Serial.print(F(" "));
         Serial.print(phase_locked ? '1' : '0');
-        Serial.print(F(" tgt=")); Serial.print(target_phase, 1);
-        Serial.print(F(" tau=")); Serial.print(ct_tau * 1e6f, 1);
-        Serial.println(F("us"));
+        Serial.print(F(" tgt=")); Serial.println(TARGET_PHASE, 1);
       }
       // Toggle debug output with 'v' (verbose)
       else if (cb[0] == 'v') {
@@ -369,9 +405,7 @@ void setup() {
   Serial.begin(115200);
   delay(300);
 
-  // Compute CT time constant from calibration point
-  ct_tau = tanf(CAL_PHASE * 0.01745329f) / (6.2831853f * (float)CAL_FREQ);
-  Serial.print(F("CT tau=")); Serial.print(ct_tau * 1e6f, 1); Serial.println(F("us"));
+  Serial.print(F("Target phase=")); Serial.print(TARGET_PHASE, 1); Serial.println(F("deg"));
 
   prog_start = millis();
 
@@ -396,8 +430,10 @@ void setup() {
   pinMode(BTN_UP, INPUT_PULLDOWN);
   pinMode(BTN_DOWN, INPUT_PULLDOWN);
 
-  attachInterrupt(digitalPinToInterrupt(TANK_PIN), tankISR, RISING);
+  // No attachInterrupt needed: tank edge is captured in hardware by TIM2_CH1,
+  // and the lock switch / buttons are polled in loop().
   TIM1_Init(start_frequency + UNLOCK_OFFSET);
+  TIM2_CaptureInit();
   u8x8.clear();
 }
 
@@ -460,8 +496,7 @@ void loop() {
     if (lsw) {
       phase_locked = true; ph_idx = 0; phase_hist_init = false;
       in_db = false; stb_cnt = 0; int_err = 0; freq_acc = cur_freq;
-      target_phase = ctTargetPhase(cur_freq);
-      last_valid_phase = target_phase;
+      last_valid_phase = TARGET_PHASE;
       rejected_cnt = 0;
     } else {
       phase_locked = false; in_db = false; int_err = 0; stb_cnt = 0;
@@ -472,35 +507,16 @@ void loop() {
     }
   }
 
-  // ---- UNLOCKED: keep cur_freq >= tank_freq + 1 kHz ----
-  if (!phase_locked) {
-    noInterrupts();
-    uint32_t tp = tank_period_us;
-    uint32_t te = tank_last_edge_us;
-    interrupts();
-
-    // Only act if we've seen edges recently (within 20 ms)
-    if (tp > 0 && (micros() - te) < 20000UL) {
-      uint32_t tank_f = 1000000UL / tp;                 // Hz
-      uint32_t floor_f = tank_f + TANK_MIN_GAP_KHZ;     // min allowed cur_freq
-      if (floor_f > MAX_FREQ) floor_f = MAX_FREQ;
-      if (cur_freq < floor_f && (millis() - last_tank_fresh) >= 5) {
-        last_tank_fresh = millis();
-        updateFreq(floor_f);
-        freq_acc = floor_f;
-      }
-    }
-  }
-
   // Phase lock control - 200Hz
   if (millis() - last_upd > 5) {
     last_upd = millis();
 
-    if (phase_locked && lsw && new_edge) {
-      noInterrupts();
-      uint16_t cnt_val = tank_cnt;
-      new_edge = false;
-      interrupts();
+    if (TIM2->SR & TIM_SR_CC1IF) {
+      // Reading CCR1 automatically clears CC1IF.
+      uint16_t cnt_val = (uint16_t)TIM2->CCR1;
+      // If the loop fell behind and missed captures, CC1OF is set; it's
+      // informational only (CCR1 always holds the most recent capture).
+      TIM2->SR &= ~TIM_SR_CC1OF;
 
       uint32_t arr_plus1 = TIM1->ARR + 1;
       uint32_t ccr1 = TIM1->CCR1;
@@ -513,36 +529,43 @@ void loop() {
       dbg_cnt_val = cnt_val;
       dbg_rejected = (near_reload || near_compare);
 
-      if (near_reload || near_compare) {
-        rejected_cnt++;
+      bool valid = !(near_reload || near_compare);
+      float meas_deg = 0.0f;
 
-        if (rejected_cnt > REJECT_SWEEP_TH) {
-          freq_acc += 15.0f;
-          int32_t nf = (int32_t)(freq_acc + 0.5f);
-          if (nf > (int32_t)MAX_FREQ) { nf = MAX_FREQ; freq_acc = MAX_FREQ; }
-          if ((millis() - last_fupd) >= FREQ_UPD_INT) {
-            updateFreq((uint32_t)nf);
-            last_fupd = millis();
+      if (valid) {
+        meas_deg = ((float)cnt_val / (float)arr_plus1) * 360.0f;
+        // Wrap around TARGET_PHASE
+        while (meas_deg > TARGET_PHASE + 180.0f) meas_deg -= 360.0f;
+        while (meas_deg < TARGET_PHASE - 180.0f) meas_deg += 360.0f;
+
+        // Always publish for display, regardless of lock state.
+        cur_phase = meas_deg;
+        phase_valid = true;
+      }
+
+      // Locked-mode control logic
+      if (phase_locked && lsw) {
+        if (!valid) {
+          rejected_cnt++;
+
+          if (rejected_cnt > REJECT_SWEEP_TH) {
+            freq_acc += 15.0f;
+            int32_t nf = (int32_t)(freq_acc + 0.5f);
+            if (nf > (int32_t)MAX_FREQ) { nf = MAX_FREQ; freq_acc = MAX_FREQ; }
+            if ((millis() - last_fupd) >= FREQ_UPD_INT) {
+              updateFreq((uint32_t)nf);
+              last_fupd = millis();
+            }
           }
-        }
-      } else {
-        // ---- VALID MEASUREMENT ----
-        bool was_rejecting = (rejected_cnt > 5);
-        rejected_cnt = 0;
-
-        // Recompute target phase for current frequency
-        target_phase = ctTargetPhase(cur_freq);
-
-        float meas_deg = ((float)cnt_val / (float)arr_plus1) * 360.0f;
-
-        // Wrap around target_phase (frequency-compensated)
-        while (meas_deg > target_phase + 180.0f) meas_deg -= 360.0f;
-        while (meas_deg < target_phase - 180.0f) meas_deg += 360.0f;
+        } else {
+          // ---- VALID MEASUREMENT ----
+          bool was_rejecting = (rejected_cnt > 5);
+          rejected_cnt = 0;
 
         if (!phase_hist_init || was_rejecting) {
           for (int i = 0; i < PH_N; i++) ph_hist[i] = meas_deg;
           ph_idx = 0; phase_hist_init = true;
-          last_err = wrap180(meas_deg - target_phase);
+          last_err = wrap180(meas_deg - TARGET_PHASE);
           last_valid_phase = meas_deg;
           int_err = 0;
         }
@@ -561,7 +584,7 @@ void loop() {
         }
 
         last_valid_phase = fp;
-        float fe = wrap180(fp - target_phase);
+        float fe = wrap180(fp - TARGET_PHASE);
         disp_err = fe;
 
         if (in_db) {
@@ -616,8 +639,9 @@ void loop() {
             }
           }
         }
-      }  // end valid measurement
-    }  // end phase_locked
+      }  // end valid measurement (else branch of !valid)
+      }  // end if (phase_locked && lsw)
+    }  // end if (CC1IF)
   }  // end 200Hz tick
 
   // Debug output - raw phase data every 100ms when locked
@@ -633,7 +657,7 @@ void loop() {
     Serial.print(dbg_rejected ? F(" nope ") : F("  ok "));
     Serial.print(rejected_cnt);
     Serial.print(F(" tgt="));
-    Serial.println(target_phase, 1);
+    Serial.println(TARGET_PHASE, 1);
   }
 
   // Display every 250ms
