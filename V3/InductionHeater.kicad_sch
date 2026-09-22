@@ -8049,7 +8049,7 @@
 		)
 		(uuid "31722565-61e5-48a2-bbad-c3f389e419a0")
 	)
-	(text "1:1:1:1:1 GDT 14 Turns "
+	(text "1:1:1 GDT 14 Turns "
 		(exclude_from_sim no)
 		(at 255.016 160.782 90)
 		(effects
@@ -8259,7 +8259,7 @@
 		)
 		(uuid "bf1eff1b-787a-4008-9ac0-0d71ef30fd90")
 	)
-	(text "1:1:1:1:1 GDT 14 Turns "
+	(text "1:1:1 GDT 14 Turns "
 		(exclude_from_sim no)
 		(at 251.206 248.412 90)
 		(effects
@@ -14544,6 +14544,7 @@
 	(symbol
 		(lib_id "Device:D")
 		(at 154.94 29.21 90)
+		(mirror x)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -14554,7 +14555,7 @@
 		(fields_autoplaced yes)
 		(uuid "1a90edd5-ece8-4bde-80dd-458390c0a5db")
 		(property "Reference" "D3"
-			(at 157.48 27.9399 90)
+			(at 157.48 30.4801 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -14565,7 +14566,7 @@
 			)
 		)
 		(property "Value" "D"
-			(at 157.48 30.4799 90)
+			(at 157.48 27.9401 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -18491,6 +18492,7 @@
 	(symbol
 		(lib_id "Device:D")
 		(at 175.26 40.64 90)
+		(mirror x)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -18501,7 +18503,7 @@
 		(fields_autoplaced yes)
 		(uuid "5aa21e63-6570-41f5-b7f3-71bded69b74c")
 		(property "Reference" "D10"
-			(at 177.8 39.3699 90)
+			(at 177.8 41.9101 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -18512,7 +18514,7 @@
 			)
 		)
 		(property "Value" "D"
-			(at 177.8 41.9099 90)
+			(at 177.8 39.3701 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -19164,6 +19166,7 @@
 	(symbol
 		(lib_id "Device:D")
 		(at 175.26 29.21 90)
+		(mirror x)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -19174,7 +19177,7 @@
 		(fields_autoplaced yes)
 		(uuid "6be89478-d6e0-44c3-a212-ae08c2fcfb3f")
 		(property "Reference" "D9"
-			(at 177.8 27.9399 90)
+			(at 177.8 30.4801 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -19185,7 +19188,7 @@
 			)
 		)
 		(property "Value" "D"
-			(at 177.8 30.4799 90)
+			(at 177.8 27.9401 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -20007,6 +20010,7 @@
 	(symbol
 		(lib_id "Device:D")
 		(at 154.94 40.64 90)
+		(mirror x)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -20017,7 +20021,7 @@
 		(fields_autoplaced yes)
 		(uuid "7baaa02b-8895-4fa4-b096-f1951daeca38")
 		(property "Reference" "D4"
-			(at 157.48 39.3699 90)
+			(at 157.48 41.9101 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -20028,7 +20032,7 @@
 			)
 		)
 		(property "Value" "D"
-			(at 157.48 41.9099 90)
+			(at 157.48 39.3701 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -24580,6 +24584,7 @@
 	(symbol
 		(lib_id "Device:D")
 		(at 166.37 29.21 90)
+		(mirror x)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -24590,7 +24595,7 @@
 		(fields_autoplaced yes)
 		(uuid "b59ff0fb-b1d3-418f-8813-f1e143c23e93")
 		(property "Reference" "D7"
-			(at 168.91 27.9399 90)
+			(at 168.91 30.4801 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -24601,7 +24606,7 @@
 			)
 		)
 		(property "Value" "D"
-			(at 168.91 30.4799 90)
+			(at 168.91 27.9401 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -27849,6 +27854,7 @@
 	(symbol
 		(lib_id "Device:D")
 		(at 166.37 40.64 90)
+		(mirror x)
 		(unit 1)
 		(body_style 1)
 		(exclude_from_sim no)
@@ -27859,7 +27865,7 @@
 		(fields_autoplaced yes)
 		(uuid "e4834c16-4df0-43b3-9549-9646e56ec501")
 		(property "Reference" "D8"
-			(at 168.91 39.3699 90)
+			(at 168.91 41.9101 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
@@ -27870,7 +27876,7 @@
 			)
 		)
 		(property "Value" "D"
-			(at 168.91 41.9099 90)
+			(at 168.91 39.3701 90)
 			(show_name no)
 			(do_not_autoplace no)
 			(effects
